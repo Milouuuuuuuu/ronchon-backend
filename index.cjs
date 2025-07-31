@@ -34,14 +34,20 @@ app.post("/api/message", async (req, res) => {
 
     const systemInstruction = getSystemPromptFor(personality);
 
-    const response = await openai.chat.completions.create({
-      model: "gpt-4-turbo",
-      messages: [
-        { role: "system", content: systemInstruction },
-        ...messages
-      ],
-      temperature: 0.7,
-    });
+    // On filtre les messages pour ne garder que les rôles valides
+const cleanedMessages = messages.filter((msg) =>
+  ["user", "assistant"].includes(msg.role)
+);
+
+const response = await openai.chat.completions.create({
+  model: "gpt-4-turbo",
+  messages: [
+    { role: "system", content: systemInstruction },
+    ...cleanedMessages
+  ],
+  temperature: 0.7,
+});
+
 
     res.json({ response: response.choices[0].message.content });
 
