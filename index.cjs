@@ -1,3 +1,5 @@
+// index.cjs — CommonJS compatible, prêt pour Render
+
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
@@ -6,26 +8,37 @@ const OpenAI = require('openai');
 dotenv.config();
 
 const app = express();
-
 const port = process.env.PORT || 3000;
 
-const allowedOrigins = [
-  'chrome-extension://mbfcngdankjijdmdklffpgnfeeoijpddn',
+// ---------- CORS ----------
+// Whitelist des origines autorisées (inclure l'ID exact de l'extension)
+const WHITELIST = new Set([
+  'chrome-extension://mbfcngdankjijdmdklffpgnfeeoijpddn', // <= mets à jour si l'ID change
   'http://localhost:5173',
   'https://ronchon.com'
-];
+]);
 
-app.use(cors({
-  origin: allowedOrigins,
-  methods: ['GET', 'POST'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-License-Key']
-}));
+const corsOptions = {
+  origin(origin, cb) {
+    // Autoriser aussi les requêtes sans Origin (healthcheck, curl, etc.)
+    if (!origin || WHITELIST.has(origin)) return cb(null, true);
+    return cb(new Error(`Origin not allowed: ${origin}`), false);
+  },
+  methods: ['GET', 'POST', 'OPTIONS'],
+  // Laisser cors refléter les headers demandés par le navigateur
+  // (ne pas fixer allowedHeaders manuellement pour éviter les échecs de préflight)
+  preflightContinue: false,
+  optionsSuccessStatus: 204
+};
 
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions)); // réponses explicites aux préflight OPTIONS
 app.use(express.json());
 
+// ---------- OpenAI ----------
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// Personnalités
+// ---------- Personnalités ----------
 const personalities = {
   Doudou: "Tu es une intelligence artificielle gentille, douce, compréhensive, rassurante.",
   Trouillard: "Tu es une intelligence artificielle anxieuse, hésitante, qui doute tout le temps.",
@@ -34,10 +47,17 @@ const personalities = {
 };
 function getSystemPromptFor(p) { return personalities[p] || personalities.Doudou; }
 
-// Licences + quota
-const VALID_KEYS = new Set((process.env.LICENSE_KEYS || '').split(',').map(s => s.trim()).filter(Boolean));
+// ---------- Licences + Quota ----------
+const VALID_KEYS = new Set(
+  (process.env.LICENSE_KEYS || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean)
+);
 const MAX_FREE = Number(process.env.MAX_FREE_PER_DAY || 10);
-const hits = new Map();
+
+// Compteur mémoire-process (OK pour MVP). Pour persister, passer à Redis.
+const hits = new Map(); // key: ip_YYYY-MM-DD -> count
 
 function isPremiumFromReq(req) {
   const k = (req.headers['x-license-key'] || '').trim();
@@ -45,7 +65,7 @@ function isPremiumFromReq(req) {
 }
 function keyForIpDay(req) {
   const ip = (req.headers['x-forwarded-for'] || req.ip || '').toString().split(',')[0].trim();
-  const day = new Date().toISOString().slice(0,10);
+  const day = new Date().toISOString().slice(0, 10);
   return `${ip}_${day}`;
 }
 function incHit(req) {
@@ -59,42 +79,60 @@ function currentHits(req) {
   return hits.get(k) || 0;
 }
 
+// ---------- Route principale ----------
 app.post('/api/message', async (req, res) => {
   try {
     const { messages, personality } = req.body;
+
     if (!Array.isArray(messages) || messages.length === 0) {
       return res.status(400).json({ error: "Messages invalides." });
     }
 
     const premium = isPremiumFromReq(req);
-    console.log(`🔑 Licence ${premium ? "valide" : "invalide"} reçue:`, req.headers['x-license-key']);
+    const licenseHeader = (req.headers['x-license-key'] || '').trim();
+    console.log(`🔑 Licence ${premium ? "valide" : "invalide"} reçue: ${licenseHeader || "(vide)"}`);
 
     if (!premium) {
       if (currentHits(req) >= MAX_FREE) {
-        return res.status(429).json({ error: "Quota gratuit atteint. Passe en premium pour continuer.", premium });
+        return res.status(429).json({
+          error: "Quota gratuit atteint. Passe en premium pour continuer.",
+          premium: false
+        });
       }
       incHit(req);
     }
 
-    const cleaned = messages.filter(m => ['user','assistant'].includes(m.role));
+    // On ne garde que user/assistant (sécurité)
+    const cleaned = messages
+      .filter(m => ['user', 'assistant'].includes(m.role))
+      .slice(-20); // coupe le contexte (coût)
+
     const systemInstruction = getSystemPromptFor(personality);
 
-    const response = await openai.chat.completions.create({
-      model: "gpt-4-turbo",
+    // ---- Appel OpenAI
+    const completion = await openai.chat.completions.create({
+      model: "gpt-3.5-turbo",
       messages: [
         { role: 'system', content: systemInstruction },
         ...cleaned
       ],
-      temperature: 0.7,
+      temperature: 0.7
     });
 
-    return res.json({ response: response.choices[0].message.content, premium });
+    const content = completion?.choices?.[0]?.message?.content || "Désolé, pas de réponse générée.";
+
+    return res.json({
+      response: content,
+      premium
+    });
   } catch (err) {
     console.error("Erreur API OpenAI:", err?.response?.data || err.message);
     return res.status(500).json({ error: "Erreur serveur." });
   }
 });
 
-app.listen(port, () => console.log(`✅ Ronchon backend sur ${port}`));
-
+// ---------- Démarrage ----------
+app.listen(port, () => {
+  console.log(`✅ Ronchon backend sur ${port}`);
+});
 
