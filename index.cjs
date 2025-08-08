@@ -1,16 +1,27 @@
-const express = require('express');
-const cors = require('cors');
-const { OpenAI } = require('openai');
-require('dotenv').config();
 
+import express from 'express';
+import cors from 'cors';
+import dotenv from 'dotenv';
+
+dotenv.config();
 const app = express();
-const port = process.env.PORT || 3000;
+
+const allowedOrigins = [
+  'chrome-extension://mbfcngdankjijdmdklffpgnfeeoijpddn', // ton ID d’extension
+  'http://localhost:5173', // pour dev local
+  'https://ronchon.com' // ton site plus tard
+];
 
 app.use(cors({
-  origin: '*',
-  allowedHeaders: ['Content-Type', 'X-License-Key']
+  origin: allowedOrigins,
+  methods: ['GET', 'POST'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
+
 app.use(express.json());
+
+// tes routes ici...
+ 
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -83,3 +94,4 @@ app.post('/api/message', async (req, res) => {
 });
 
 app.listen(port, () => console.log(`✅ Ronchon backend sur ${port}`));
+
