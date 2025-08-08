@@ -1,9 +1,10 @@
-import express from 'express';
-import cors from 'cors';
-import dotenv from 'dotenv';
-import OpenAI from 'openai';
+const express = require('express');
+const cors = require('cors');
+const dotenv = require('dotenv');
+const OpenAI = require('openai');
 
 dotenv.config();
+
 const app = express();
 
 const port = process.env.PORT || 3000;
@@ -95,4 +96,5 @@ app.post('/api/message', async (req, res) => {
 });
 
 app.listen(port, () => console.log(`✅ Ronchon backend sur ${port}`));
+
 
