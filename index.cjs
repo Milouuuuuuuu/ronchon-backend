@@ -1,27 +1,26 @@
-
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import OpenAI from 'openai';
 
 dotenv.config();
 const app = express();
 
+const port = process.env.PORT || 3000;
+
 const allowedOrigins = [
-  'chrome-extension://mbfcngdankjijdmdklffpgnfeeoijpddn', // ton ID d’extension
-  'http://localhost:5173', // pour dev local
-  'https://ronchon.com' // ton site plus tard
+  'chrome-extension://mbfcngdankjijdmdklffpgnfeeoijpddn',
+  'http://localhost:5173',
+  'https://ronchon.com'
 ];
 
 app.use(cors({
   origin: allowedOrigins,
   methods: ['GET', 'POST'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-License-Key']
 }));
 
 app.use(express.json());
-
-// tes routes ici...
- 
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -37,7 +36,7 @@ function getSystemPromptFor(p) { return personalities[p] || personalities.Doudou
 // Licences + quota
 const VALID_KEYS = new Set((process.env.LICENSE_KEYS || '').split(',').map(s => s.trim()).filter(Boolean));
 const MAX_FREE = Number(process.env.MAX_FREE_PER_DAY || 10);
-const hits = new Map(); // key: ip_YYYY-MM-DD -> count
+const hits = new Map();
 
 function isPremiumFromReq(req) {
   const k = (req.headers['x-license-key'] || '').trim();
@@ -67,9 +66,11 @@ app.post('/api/message', async (req, res) => {
     }
 
     const premium = isPremiumFromReq(req);
+    console.log(`🔑 Licence ${premium ? "valide" : "invalide"} reçue:`, req.headers['x-license-key']);
+
     if (!premium) {
       if (currentHits(req) >= MAX_FREE) {
-        return res.status(429).json({ error: "Quota gratuit atteint. Passe en premium pour continuer." });
+        return res.status(429).json({ error: "Quota gratuit atteint. Passe en premium pour continuer.", premium });
       }
       incHit(req);
     }
