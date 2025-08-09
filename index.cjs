@@ -32,7 +32,7 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-app.options('*', cors(corsOptions)); // réponses explicites aux préflight OPTIONS
+app.options('/api/*', cors(corsOptions)); // réponses explicites aux préflight OPTIONS
 app.use(express.json());
 
 // ---------- OpenAI ----------
@@ -135,4 +135,5 @@ app.post('/api/message', async (req, res) => {
 app.listen(port, () => {
   console.log(`✅ Ronchon backend sur ${port}`);
 });
+
 
