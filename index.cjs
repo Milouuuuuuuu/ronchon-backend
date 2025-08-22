@@ -8,7 +8,7 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 const WHITELIST = new Set([
-  'chrome-extension://mbfcngdankjijdmdklffpgnfeeoijpddn',
+  'chrome-extension://mbfcngdankjjdmdkflfpgnfeeoijpddn',
   'http://localhost:5173',
   'https://ronchon.com'
 ]);
@@ -131,6 +131,7 @@ app.post('/api/message', async (req, res) => {
 app.listen(port, () => {
   console.log(`✅ Ronchon backend sur ${port}`);
 });
+
 
 
 
