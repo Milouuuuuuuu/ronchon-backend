@@ -1,38 +1,34 @@
-// index.cjs — CommonJS compatible, prêt pour Render
-
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
 const OpenAI = require('openai');
-
 dotenv.config();
 
 const app = express();
 const port = process.env.PORT || 3000;
 
-// ---------- CORS ----------
-// Whitelist des origines autorisées (inclure l'ID exact de l'extension)
 const WHITELIST = new Set([
-  'chrome-extension://mbfcngdankjijdmdklffpgnfeeoijpddn', // <= mets à jour si l'ID change
+  'chrome-extension://mbfcngdankjijdmdklffpgnfeeoijpddn',
   'http://localhost:5173',
   'https://ronchon.com'
 ]);
 
 const corsOptions = {
   origin(origin, cb) {
-    // Autoriser aussi les requêtes sans Origin (healthcheck, curl, etc.)
     if (!origin || WHITELIST.has(origin)) return cb(null, true);
     return cb(new Error(`Origin not allowed: ${origin}`), false);
   },
   methods: ['GET', 'POST', 'OPTIONS'],
-  // Laisser cors refléter les headers demandés par le navigateur
-  // (ne pas fixer allowedHeaders manuellement pour éviter les échecs de préflight)
-  preflightContinue: false,
   optionsSuccessStatus: 204
 };
 
 app.use(cors(corsOptions));
-app.options('/api/*', cors(corsOptions)); // réponses explicites aux préflight OPTIONS
+// Réponse générique aux préflights (aucun chemin wildcard)
+app.use((req, res, next) => {
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
 app.use(express.json());
 
 // ---------- OpenAI ----------
@@ -135,5 +131,6 @@ app.post('/api/message', async (req, res) => {
 app.listen(port, () => {
   console.log(`✅ Ronchon backend sur ${port}`);
 });
+
 
 
