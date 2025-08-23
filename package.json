@@ -11,5 +11,8 @@
     "dotenv": "^17.2.1",
     "express": "^4.19.2",
     "openai": "^5.10.1"
-  }
+    "express-rate-limit": "^7.1.5"
+  },
+  "main": "index.cjs",
+  "scripts": { "start": "node index.cjs" }
 }
