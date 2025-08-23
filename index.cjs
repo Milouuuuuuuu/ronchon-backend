@@ -2,11 +2,15 @@ const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
 const OpenAI = require('openai');
+const rateLimit = require('express-rate-limit');
+
 dotenv.config();
 
 const app = express();
 const port = process.env.PORT || 3000;
 
+/* ---------- CORS ---------- */
+// Whitelist : ton ID d’extension + tes origines HTTP/HTTPS
 const WHITELIST = new Set([
   'chrome-extension://mbfcngdankjjdmdkflfpgnfeeoijpddn',
   'http://localhost:5173',
@@ -15,6 +19,7 @@ const WHITELIST = new Set([
 
 const corsOptions = {
   origin(origin, cb) {
+    // Autorise aussi les requêtes sans Origin (healthcheck, curl, etc.)
     if (!origin || WHITELIST.has(origin)) return cb(null, true);
     return cb(new Error(`Origin not allowed: ${origin}`), false);
   },
@@ -23,11 +28,18 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-// JSON body limit (évite les payloads gigantesques)
+
+/* ---------- Préflight / Body limit / Rate-limit ---------- */
+// Un seul handler OPTIONS suffit
+app.use((req, res, next) => {
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
+// JSON body limit (évite les payloads trop gros)
 app.use(express.json({ limit: '200kb' }));
 
-// Rate-limit de base (60 req / min / IP)
-const rateLimit = require('express-rate-limit');
+// Rate-limit de base (60 req/min/IP)
 app.use(rateLimit({
   windowMs: 60 * 1000,
   max: 60,
@@ -35,24 +47,10 @@ app.use(rateLimit({
   legacyHeaders: false
 }));
 
-// Préflight clean (si pas déjà présent)
-app.use((req, res, next) => {
-  if (req.method === 'OPTIONS') return res.sendStatus(204);
-  next();
-});
-
-// Réponse générique aux préflights (aucun chemin wildcard)
-app.use((req, res, next) => {
-  if (req.method === 'OPTIONS') return res.sendStatus(204);
-  next();
-});
-
-app.use(express.json());
-
-// ---------- OpenAI ----------
+/* ---------- OpenAI ---------- */
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// ---------- Personnalités ----------
+/* ---------- Personnalités ---------- */
 const personalities = {
   Doudou: "Tu es une intelligence artificielle gentille, douce, compréhensive, rassurante.",
   Trouillard: "Tu es une intelligence artificielle anxieuse, hésitante, qui doute tout le temps.",
@@ -61,7 +59,7 @@ const personalities = {
 };
 function getSystemPromptFor(p) { return personalities[p] || personalities.Doudou; }
 
-// ---------- Licences + Quota ----------
+/* ---------- Licences + Quota (mémoire process) ---------- */
 const VALID_KEYS = new Set(
   (process.env.LICENSE_KEYS || '')
     .split(',')
@@ -70,7 +68,6 @@ const VALID_KEYS = new Set(
 );
 const MAX_FREE = Number(process.env.MAX_FREE_PER_DAY || 10);
 
-// Compteur mémoire-process (OK pour MVP). Pour persister, passer à Redis.
 const hits = new Map(); // key: ip_YYYY-MM-DD -> count
 
 function isPremiumFromReq(req) {
@@ -93,7 +90,16 @@ function currentHits(req) {
   return hits.get(k) || 0;
 }
 
-// ---------- Route principale ----------
+/* ---------- Validation de licence (⚠️ hors /api/message) ---------- */
+// GET /api/license?key=ABC123  -> { valid: true/false }
+app.get('/api/license', (req, res) => {
+  const key = (req.query.key || '').trim();
+  if (!key) return res.status(400).json({ valid: false, error: 'missing_key' });
+  const ok = VALID_KEYS.has(key);
+  return res.json({ valid: ok });
+});
+
+/* ---------- Route principale ---------- */
 app.post('/api/message', async (req, res) => {
   try {
     const { messages, personality } = req.body;
@@ -101,14 +107,7 @@ app.post('/api/message', async (req, res) => {
     if (!Array.isArray(messages) || messages.length === 0) {
       return res.status(400).json({ error: "Messages invalides." });
     }
-// Validation de licence : GET /api/license?key=ABC123
-app.get('/api/license', (req, res) => {
-  const key = (req.query.key || '').trim();
-  if (!key) return res.status(400).json({ valid: false, error: 'missing_key' });
 
-  const ok = VALID_KEYS.has(key);
-  return res.json({ valid: ok });
-});
     const premium = isPremiumFromReq(req);
     const licenseHeader = (req.headers['x-license-key'] || '').trim();
     console.log(`🔑 Licence ${premium ? "valide" : "invalide"} reçue: ${licenseHeader || "(vide)"}`);
@@ -123,14 +122,13 @@ app.get('/api/license', (req, res) => {
       incHit(req);
     }
 
-    // On ne garde que user/assistant (sécurité)
-    const cleaned = messages
+    // On ne garde que user/assistant (sécurité + coût)
+    const cleaned = (messages || [])
       .filter(m => ['user', 'assistant'].includes(m.role))
-      .slice(-20); // coupe le contexte (coût)
+      .slice(-20);
 
     const systemInstruction = getSystemPromptFor(personality);
 
-    // ---- Appel OpenAI
     const completion = await openai.chat.completions.create({
       model: "gpt-3.5-turbo",
       messages: [
@@ -152,12 +150,10 @@ app.get('/api/license', (req, res) => {
   }
 });
 
-// ---------- Démarrage ----------
+/* ---------- Démarrage ---------- */
 app.listen(port, () => {
   console.log(`✅ Ronchon backend sur ${port}`);
 });
-
-
 
 
 
