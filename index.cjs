@@ -23,6 +23,24 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
+// JSON body limit (évite les payloads gigantesques)
+app.use(express.json({ limit: '200kb' }));
+
+// Rate-limit de base (60 req / min / IP)
+const rateLimit = require('express-rate-limit');
+app.use(rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false
+}));
+
+// Préflight clean (si pas déjà présent)
+app.use((req, res, next) => {
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
 // Réponse générique aux préflights (aucun chemin wildcard)
 app.use((req, res, next) => {
   if (req.method === 'OPTIONS') return res.sendStatus(204);
@@ -83,7 +101,14 @@ app.post('/api/message', async (req, res) => {
     if (!Array.isArray(messages) || messages.length === 0) {
       return res.status(400).json({ error: "Messages invalides." });
     }
+// Validation de licence : GET /api/license?key=ABC123
+app.get('/api/license', (req, res) => {
+  const key = (req.query.key || '').trim();
+  if (!key) return res.status(400).json({ valid: false, error: 'missing_key' });
 
+  const ok = VALID_KEYS.has(key);
+  return res.json({ valid: ok });
+});
     const premium = isPremiumFromReq(req);
     const licenseHeader = (req.headers['x-license-key'] || '').trim();
     console.log(`🔑 Licence ${premium ? "valide" : "invalide"} reçue: ${licenseHeader || "(vide)"}`);
@@ -131,6 +156,7 @@ app.post('/api/message', async (req, res) => {
 app.listen(port, () => {
   console.log(`✅ Ronchon backend sur ${port}`);
 });
+
 
 
 
