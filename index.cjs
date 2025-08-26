@@ -21,7 +21,6 @@ const WHITELIST = new Set([
   'chrome-extension://mbfcngdankjjdmdkflfpgnfeeoijpddn',
   'http://localhost:5173',
   'https://ronchon.com'
-  'https://ronchon.com',
 ]);
 
 const corsOptions = {
@@ -268,6 +267,7 @@ app.listen(port, () => {
 app.listen(port, () => {
   console.log(`✅ Ronchon backend sur ${port}`);
 });
+
 
 
 
