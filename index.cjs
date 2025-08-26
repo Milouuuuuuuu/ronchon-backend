@@ -69,21 +69,15 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 /* ---------- Personnalités ---------- */
 /* ===================== Personnalités ===================== */
+// ---------- Personnalités ----------
 const personalities = {
-  Doudou: "Tu es une intelligence artificielle gentille, douce, compréhensive, rassurante.",
-  Trouillard: "Tu es une intelligence artificielle anxieuse, hésitante, qui doute tout le temps.",
-  Énervé: "Tu es une intelligence artificielle impatiente, directe, qui n'aime pas qu'on tourne autour du pot.",
-  Hater: "Tu es une intelligence artificielle arrogante, méprisante, qui ne supporte pas la bêtise humaine."
-  Doudou:
-    'Tu es une intelligence artificielle gentille, douce, compréhensive, rassurante.',
-  Trouillard:
-    'Tu es une intelligence artificielle anxieuse, hésitante, qui doute tout le temps.',
-  Énervé:
-    "Tu es une intelligence artificielle impatiente, directe, qui n'aime pas qu'on tourne autour du pot.",
-  Hater:
-    'Tu es une intelligence artificielle arrogante, méprisante, qui ne supporte pas la bêtise humaine.',
+  'Doudou': 'Tu es une intelligence artificielle gentille, douce, compréhensive, rassurante.',
+  'Trouillard': 'Tu es une intelligence artificielle anxieuse, hésitante, qui doute tout le temps.',
+  'Énervé': "Tu es une intelligence artificielle impatiente, directe, qui n'aime pas qu'on tourne autour du pot.",
+  'Hater': 'Tu es une intelligence artificielle arrogante, méprisante, qui ne supporte pas la bêtise humaine.'
 };
-function getSystemPromptFor(p) { return personalities[p] || personalities.Doudou; }
+function getSystemPromptFor(p) { return personalities[p] || personalities['Doudou']; }
+
 function getSystemPromptFor(p) {
   return personalities[p] || personalities.Doudou;
 }
@@ -265,6 +259,7 @@ app.listen(port, () => {
 app.listen(port, () => {
   console.log(`✅ Ronchon backend sur ${port}`);
 });
+
 
 
 
