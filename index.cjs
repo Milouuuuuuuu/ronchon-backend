@@ -25,15 +25,13 @@ const WHITELIST = new Set([
 
 const corsOptions = {
   origin(origin, cb) {
-    // Autorise aussi les requêtes sans Origin (healthcheck, curl, etc.)
-    // Autoriser aussi les requêtes sans Origin (healthcheck, curl…)
     if (!origin || WHITELIST.has(origin)) return cb(null, true);
     return cb(new Error(`Origin not allowed: ${origin}`), false);
   },
   methods: ['GET', 'POST', 'OPTIONS'],
   optionsSuccessStatus: 204
-  optionsSuccessStatus: 204,
 };
+
 
 app.use(cors(corsOptions));
 
@@ -267,6 +265,7 @@ app.listen(port, () => {
 app.listen(port, () => {
   console.log(`✅ Ronchon backend sur ${port}`);
 });
+
 
 
 
