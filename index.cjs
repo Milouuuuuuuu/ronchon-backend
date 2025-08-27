@@ -224,14 +224,23 @@ app.post('/api/message', async (req, res) => {
     // Prompt système selon personnalité (inchangé dans l\'esprit)
     const systemInstruction = getSystemPromptFor(personality);
 
-    // Appel OpenAI (préserve ton schéma)
+    // Sélection du modèle/temperature selon le tier
+    const model = premium
+      ? (process.env.OPENAI_MODEL_PREMIUM || process.env.OPENAI_MODEL || 'gpt-4o-mini')
+      : (process.env.OPENAI_MODEL_FREE || process.env.OPENAI_MODEL || 'gpt-3.5-turbo');
+
+    const temperature = Number(
+      process.env.OPENAI_TEMPERATURE || (premium ? 0.6 : 0.7)
+    );
+
+    // Appel OpenAI
     const completion = await openai.chat.completions.create({
-      model: process.env.OPENAI_MODEL || 'gpt-3.5-turbo',
+      model,
       messages: [
         { role: 'system', content: systemInstruction },
         ...cleaned
       ],
-      temperature: Number(process.env.OPENAI_TEMPERATURE || 0.7)
+      temperature
     });
 
     const content = completion?.choices?.[0]?.message?.content || 'Désolé, pas de réponse générée.';
@@ -253,8 +262,6 @@ app.post('/api/message', async (req, res) => {
 app.listen(port, () => {
   console.log(`✅ Ronchon backend démarré sur ${port}`);
 });
-
-
 
 
 
