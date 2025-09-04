@@ -12,6 +12,9 @@ const dotenv = require('dotenv');
 const rateLimit = require('express-rate-limit');
 const OpenAI = require('openai');
 const crypto = require('crypto');
+const Stripe = require('stripe');
+const bodyParser = require('body-parser');
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 let Redis; try { ({ Redis } = require('@upstash/redis')); } catch(_) {}
 
 dotenv.config();
@@ -43,7 +46,55 @@ app.use(cors({
   },
   credentials: true
 }));
+// ⚠️ Le webhook Stripe DOIT lire le raw body, donc il doit être défini AVANT express.json() !
+app.post('/api/stripe/webhook',
+  bodyParser.raw({ type: 'application/json' }),
+  async (req, res) => {
+    try {
+      const sig = req.headers['stripe-signature'];
+      const event = stripe.webhooks.constructEvent(
+        req.body,
+        sig,
+        process.env.STRIPE_WEBHOOK_SECRET
+      );
+
+      if (event.type === 'checkout.session.completed') {
+        const session = event.data.object;
+        const key = session.client_reference_id; // on rattache à ta clé client (IP+clientId)
+        if (key) {
+          await setPremium(key, true); // 👉 ta fonction existante qui active Premium
+        }
+      }
+
+      // (Optionnel) gérer la fin d’abonnement si tu veux plus tard :
+      // if (event.type === 'customer.subscription.deleted') { ... setPremium(key, false) ... }
+
+      return res.json({ received: true });
+    } catch (err) {
+      console.error('Stripe webhook error:', err?.message || err);
+      return res.status(400).send('Webhook Error');
+    }
+  }
+);
+
 app.use(express.json({ limit: '1mb' }));
+app.post('/api/stripe/checkout', async (req, res) => {
+  try {
+    const key = getClientKey(req); // ta clé (IP + x-client-id)
+    const session = await stripe.checkout.sessions.create({
+      mode: 'subscription',
+      line_items: [{ price: process.env.STRIPE_PRICE_ID, quantity: 1 }],
+      client_reference_id: key,
+      success_url: (process.env.FRONTEND_BASE_URL || 'https://example.com') + '/success',
+      cancel_url: (process.env.FRONTEND_BASE_URL || 'https://example.com') + '/cancel'
+    });
+    return res.json({ url: session.url });
+  } catch (e) {
+    console.error('checkout error:', e?.message || e);
+    return res.status(500).json({ error: 'checkout_failed' });
+  }
+});
+
 
 /* =========================
  *  Limiteur global (préservé)
@@ -262,6 +313,7 @@ app.post('/api/message', async (req, res) => {
 app.listen(port, () => {
   console.log(`✅ Ronchon backend démarré sur ${port}`);
 });
+
 
 
 
