@@ -61,14 +61,37 @@ app.post('/api/stripe/webhook',
       if (event.type === 'checkout.session.completed') {
         const session = event.data.object;
         const key = session.client_reference_id; // on rattache à ta clé client (IP+clientId)
+        const customerId = session.customer;
         if (key) {
           await setPremium(key, true); // 👉 ta fonction existante qui active Premium
         }
+        // Sauvegarde du mapping customer -> key pour les futurs webhooks
+        if (customerId && key) {
+          await saveCustomerKey(customerId, key);
+        }
+      }
       }
 
       // (Optionnel) gérer la fin d’abonnement si tu veux plus tard :
       // if (event.type === 'customer.subscription.deleted') { ... setPremium(key, false) ... }
 
+      
+      // ➜ Rétrograder en FREE quand l'abonnement est supprimé
+      if (event.type === 'customer.subscription.deleted') {
+        const subscription = event.data.object;
+        const customerId = subscription.customer;
+        // Essaye d'abord via metadata, sinon via mapping persisté
+        let key = subscription?.metadata?.ronchon_key || null;
+        if (!key && customerId) {
+          key = await getKeyFromCustomer(customerId);
+        }
+        if (key) {
+          await setPremium(key, false);
+          console.log(`🧹 customer.subscription.deleted → FREE for customer=${customerId}, key=${key}`);
+        } else {
+          console.warn('⚠️ subscription.deleted reçu mais key introuvable.');
+        }
+      }
       return res.json({ received: true });
     } catch (err) {
       console.error('Stripe webhook error:', err?.message || err);
@@ -83,6 +106,7 @@ app.post('/api/stripe/checkout', async (req, res) => {
     const key = getClientKey(req); // ta clé (IP + x-client-id)
     const session = await stripe.checkout.sessions.create({
       mode: 'subscription',
+      subscription_data: { metadata: { ronchon_key: key } },
       line_items: [{ price: process.env.STRIPE_PRICE_ID, quantity: 1 }],
       client_reference_id: key,
       success_url: (process.env.FRONTEND_BASE_URL || 'https://example.com') + '/success',
@@ -144,6 +168,26 @@ if (Redis && process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_RES
 // Fallback in-memory pour environnement sans Redis (MVP / dev)
 if (!global.__hits) global.__hits = new Map();         // key -> { dateISO, count }
 if (!global.__premium) global.__premium = new Set();   // key set
+
+// Mapping customerId -> key (pour relier les webhooks à ton utilisateur)
+if (!global.__cust2key) global.__cust2key = new Map();  // customerId -> key
+
+async function saveCustomerKey(customerId, key) {
+  if (!customerId || !key) return;
+  if (redis) {
+    await redis.hset('ronchon:cust2key', { [customerId]: key });
+  } else {
+    global.__cust2key.set(customerId, key);
+  }
+}
+
+async function getKeyFromCustomer(customerId) {
+  if (!customerId) return null;
+  if (redis) {
+    return await redis.hget('ronchon:cust2key', customerId);
+  }
+  return global.__cust2key.get(customerId) || null;
+}
 
 /* =========================
  *  Quotas & Premium
@@ -325,6 +369,11 @@ app.get('/success', (req, res) => {
 app.get('/cancel', (req, res) => {
   res.sendFile(path.join(__dirname, 'cancel.html'));
 });
+
+
+
+
+
 
 
 
