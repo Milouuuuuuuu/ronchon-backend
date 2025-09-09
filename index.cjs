@@ -255,12 +255,54 @@ if (process.env.DEV_TEST_SECRET) {
 }
 
 // ---------------------------
+// Pages HTML success & cancel
+// ---------------------------
+app.get('/success', (req, res) => {
+  res.type('html').send(`<!DOCTYPE html>
+<html lang="fr"><head><meta charset="utf-8"><title>Paiement réussi</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+body{font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#0b1220;color:#e7f0ff}
+.card{background:#111b2e;border:1px solid #24314d;border-radius:16px;padding:28px;max-width:520px;box-shadow:0 8px 24px rgba(0,0,0,.35);text-align:center}
+h1{margin:0 0 8px;font-size:24px}
+p{opacity:.9}
+a.btn{display:inline-block;margin-top:16px;padding:10px 14px;border-radius:10px;border:1px solid #3a57a5;text-decoration:none;color:#e7f0ff}
+a.btn:hover{background:#1a2a52}
+</style></head>
+<body><div class="card">
+<h1>✅ Paiement réussi</h1>
+<p>Ton abonnement <b>Premium</b> est activé. Tu peux fermer cet onglet et retourner sur l’extension.</p>
+<a class="btn" href="/">Retour</a>
+</div></body></html>`);
+});
+
+app.get('/cancel', (req, res) => {
+  res.type('html').send(`<!DOCTYPE html>
+<html lang="fr"><head><meta charset="utf-8"><title>Paiement annulé</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+body{font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#0b1220;color:#e7f0ff}
+.card{background:#111b2e;border:1px solid #24314d;border-radius:16px;padding:28px;max-width:520px;box-shadow:0 8px 24px rgba(0,0,0,.35);text-align:center}
+h1{margin:0 0 8px;font-size:24px}
+p{opacity:.9}
+a.btn{display:inline-block;margin-top:16px;padding:10px 14px;border-radius:10px;border:1px solid #a53a3a;text-decoration:none;color:#e7f0ff}
+a.btn:hover{background:#522a2a}
+</style></head>
+<body><div class="card">
+<h1>❌ Paiement annulé</h1>
+<p>Aucun débit n’a été effectué. Tu peux réessayer quand tu veux.</p>
+<a class="btn" href="/">Retour</a>
+</div></body></html>`);
+});
+
+// ---------------------------
 // Start server
 // ---------------------------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Ronchon backend listening on :${PORT}`);
 });
+
 
 
 
