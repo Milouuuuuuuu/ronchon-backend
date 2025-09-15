@@ -83,12 +83,12 @@ const memory = {
 
 // Construit une clé stable pour l'utilisateur à partir de l'IP + x-client-id
 function getClientKey(req) {
-  const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || req.ip || '').toString().trim();
+  // clé stable, indépendante de l'IP
   const cid = (req.headers['x-client-id'] || '').toString().trim();
-  const ipNorm = ip.replace(/[^a-zA-Z0-9:.\-]/g, '').slice(-64);
-  const cidNorm = cid.replace(/[^a-zA-Z0-9\-_.]/g, '').slice(0, 64);
-  return `${ipNorm}::${cidNorm || 'anonymous'}`;
+  const cidNorm = cid.replace(/[^a-zA-Z0-9\-_.]/g, '').slice(0, 80);
+  return `cid:${cidNorm || 'anonymous'}`;
 }
+
 
 function todayStr() {
   const d = new Date();
@@ -435,6 +435,7 @@ app.post('/api/message', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Ronchon backend listening on :${PORT}`);
 });
+
 
 
 
