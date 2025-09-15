@@ -1,311 +1,440 @@
-// index.cjs — corrigé sans rien casser, avec Stripe webhooks fiables
-// - Fix: raw body pour webhook + condition startsWith()
-// - Ajout: subscription_data.metadata.ronchon_key
-// - Ajout: mapping customerId -> key pour relier les webhooks
-// - Ajout: handler customer.subscription.deleted (downgrade FREE)
-// - Compat: garde des endpoints existants (plan, message)
+/**
+ * Ronchon Backend - index.cjs
+ * MVP complet avec quotas, Premium, Stripe (checkout + webhook), pages de redirection.
+ */
 
 require('dotenv').config();
+
 const express = require('express');
-const bodyParser = require('body-parser');
+const cors = require('cors');
+const rateLimit = require('express-rate-limit');
+const { OpenAI } = require('openai');
 const Stripe = require('stripe');
+const bodyParser = require('body-parser');
+const path = require('path');
 
-// Optionnel: Upstash Redis (si variables présentes). Sinon, fallback mémoire.
-let redis = null;
-try {
-  const { Redis } = require('@upstash/redis');
-  if (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) {
-    redis = new Redis({
-      url: process.env.UPSTASH_REDIS_REST_URL,
-      token: process.env.UPSTASH_REDIS_REST_TOKEN,
-    });
-  }
-} catch (_) {}
+/* =========================
+   Config & Instances
+========================= */
 
-const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 const app = express();
+const PORT = process.env.PORT || 3000;
 
-// ---------------------------
-// Stores (mémoire avec option Redis)
-// ---------------------------
-if (!global.__hits) global.__hits = new Map();
-if (!global.__premium) global.__premium = new Set();
-if (!global.__cust2key) global.__cust2key = new Map(); // customerId -> key
-if (!global.__processedEvents) global.__processedEvents = new Set();
+// OpenAI client
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY
+});
 
+// Stripe client (clé test/prod selon env)
+const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
+
+// Quotas
+const MAX_FREE_PER_DAY = Number(process.env.MAX_FREE_PER_DAY || 20);
+const MAX_PREMIUM_PER_DAY = Number(process.env.MAX_PREMIUM_PER_DAY || 200);
+
+// Modèles
+const MODEL_DEFAULT = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+const MODEL_FREE = process.env.OPENAI_MODEL_FREE || MODEL_DEFAULT;
+const MODEL_PREMIUM = process.env.OPENAI_MODEL_PREMIUM || MODEL_DEFAULT;
+
+// CORS (ouvre à tout par défaut; tu peux restreindre)
+app.use(cors());
+
+/* =========================
+   Redis (optionnel) ou mémoire
+========================= */
+
+let redis = null;
+let useRedis = false;
+
+// In-memory fallback
+const memory = {
+  premium: new Set(),                         // keys premium
+  hits: new Map(),                            // 'YYYY-MM-DD:key' -> count
+  submap: new Map(),                          // subscriptionId -> key
+  customerByKey: new Map(),                   // key -> customerId
+  keyByCustomer: new Map()                    // customerId -> key
+};
+
+(async () => {
+  try {
+    if (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) {
+      const { Redis } = require('@upstash/redis');
+      redis = new Redis({
+        url: process.env.UPSTASH_REDIS_REST_URL,
+        token: process.env.UPSTASH_REDIS_REST_TOKEN
+      });
+      // ping simple
+      await redis.ping();
+      useRedis = true;
+      console.log('[Redis] Connected to Upstash');
+    } else {
+      console.log('[Redis] Not configured — using in-memory store');
+    }
+  } catch (e) {
+    console.warn('[Redis] Connection failed — using in-memory store');
+    useRedis = false;
+  }
+})();
+
+/* =========================
+   Helpers (clé utilisateur & quota)
+========================= */
+
+// Construit une clé stable pour l'utilisateur à partir de l'IP + x-client-id
 function getClientKey(req) {
-  const h = req.headers['x-client-id'];
-  const xfwd = req.headers['x-forwarded-for'];
-  const ip = xfwd ? xfwd.split(',')[0].trim() : (req.ip || 'unknown');
-  return String(h || ip);
+  const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || req.ip || '').toString().trim();
+  const cid = (req.headers['x-client-id'] || '').toString().trim();
+  const ipNorm = ip.replace(/[^a-zA-Z0-9:.\-]/g, '').slice(-64);
+  const cidNorm = cid.replace(/[^a-zA-Z0-9\-_.]/g, '').slice(0, 64);
+  return `${ipNorm}::${cidNorm || 'anonymous'}`;
+}
+
+function todayStr() {
+  const d = new Date();
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(d.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
 }
 
 async function isPremium(key) {
-  if (redis) return !!(await redis.sismember('ronchon:premium', key));
-  return global.__premium.has(key);
+  if (useRedis) {
+    return await redis.sismember('ronchon:premium', key);
+  }
+  return memory.premium.has(key);
 }
-async function setPremium(key, value) {
-  if (!key) return;
-  if (redis) {
-    if (value) await redis.sadd('ronchon:premium', key); else await redis.srem('ronchon:premium', key);
+
+async function setPremium(key, on) {
+  if (useRedis) {
+    if (on) return await redis.sadd('ronchon:premium', key);
+    return await redis.srem('ronchon:premium', key);
   } else {
-    if (value) global.__premium.add(key); else global.__premium.delete(key);
+    if (on) memory.premium.add(key);
+    else memory.premium.delete(key);
+    return true;
   }
 }
-async function incrementHits(key) {
-  if (redis) return await redis.hincrby('ronchon:hits', key, 1);
-  const n = (global.__hits.get(key) || 0) + 1; global.__hits.set(key, n); return n;
-}
-async function getHits(key) {
-  if (redis) { const v = await redis.hget('ronchon:hits', key); return Number(v || 0); }
-  return global.__hits.get(key) || 0;
-}
-async function saveCustomerKey(customerId, key) {
-  if (!customerId || !key) return;
-  if (redis) await redis.hset('ronchon:cust2key', { [customerId]: key });
-  else global.__cust2key.set(customerId, key);
-}
-async function getKeyFromCustomer(customerId) {
-  if (!customerId) return null;
-  if (redis) return await redis.hget('ronchon:cust2key', customerId);
-  return global.__cust2key.get(customerId) || null;
-}
-async function hasProcessed(eventId) {
-  if (!eventId) return false;
-  if (redis) return !!(await redis.sismember('ronchon:events', eventId));
-  return global.__processedEvents.has(eventId);
-}
-async function markProcessed(eventId) {
-  if (!eventId) return;
-  if (redis) await redis.sadd('ronchon:events', eventId);
-  else global.__processedEvents.add(eventId);
+
+async function getHits(key, date = todayStr()) {
+  const hitKey = `ronchon:hits:${date}:${key}`;
+  if (useRedis) {
+    const v = await redis.get(hitKey);
+    return Number(v || 0);
+  }
+  return Number(memory.hits.get(hitKey) || 0);
 }
 
-// ---------------------------
-// Middlewares: JSON partout SAUF le webhook Stripe
-// ---------------------------
-app.use((req, res, next) => {
-  // 🔧 Important: startsWith pour gérer les querystrings et les / finaux
-  if (req.originalUrl && req.originalUrl.startsWith('/api/stripe/webhook')) return next();
-  return express.json({ limit: '1mb' })(req, res, next);
+async function incHits(key, date = todayStr()) {
+  const hitKey = `ronchon:hits:${date}:${key}`;
+  if (useRedis) {
+    return await redis.incr(hitKey);
+  } else {
+    const cur = Number(memory.hits.get(hitKey) || 0) + 1;
+    memory.hits.set(hitKey, cur);
+    return cur;
+  }
+}
+
+async function getLimit(key) {
+  const prem = await isPremium(key);
+  return prem ? MAX_PREMIUM_PER_DAY : MAX_FREE_PER_DAY;
+}
+
+/* =========================
+   STRIPE WEBHOOK
+   ⚠️ DOIT ÊTRE DÉFINI AVANT express.json()
+========================= */
+
+// We expose /api/stripe/webhook before json() to keep raw body for signature verification
+app.post('/api/stripe/webhook',
+  bodyParser.raw({ type: 'application/json' }),
+  async (req, res) => {
+    if (!stripe || !process.env.STRIPE_WEBHOOK_SECRET) {
+      // Stripe pas configuré : on ignore gracieusement
+      return res.status(200).json({ skipped: true });
+    }
+
+    const sig = req.headers['stripe-signature'];
+    let event;
+    try {
+      event = stripe.webhooks.constructEvent(
+        req.body,
+        sig,
+        process.env.STRIPE_WEBHOOK_SECRET
+      );
+    } catch (err) {
+      console.error('[WH] Signature verification failed:', err.message);
+      return res.status(400).send('Webhook Error');
+    }
+
+    try {
+      // 1) Activation premium à la fin du checkout
+      if (event.type === 'checkout.session.completed') {
+        const session = event.data.object;
+        const key = session.client_reference_id;
+        const subId = session.subscription;   // ex: sub_...
+        const customerId = session.customer;  // ex: cus_...
+
+        console.log('[WH] checkout.session.completed', { key, subId, customerId });
+
+        if (key) {
+          await setPremium(key, true);
+
+          // Mappings pour gérer la résiliation ensuite
+          if (useRedis) {
+            if (subId) await redis.hset('ronchon:submap', { [subId]: key });
+            if (customerId) {
+              await redis.hset('ronchon:customerByKey', { [key]: customerId });
+              await redis.hset('ronchon:keyByCustomer', { [customerId]: key });
+            }
+          } else {
+            if (subId) memory.submap.set(subId, key);
+            if (customerId) {
+              memory.customerByKey.set(key, customerId);
+              memory.keyByCustomer.set(customerId, key);
+            }
+          }
+
+          console.log('[WH] Premium ON + mappings saved');
+        } else {
+          console.warn('[WH] No client_reference_id on session; skip setPremium');
+        }
+
+        return res.json({ received: true });
+      }
+
+      // 2) Résiliation → repasser en FREE
+      if (event.type === 'customer.subscription.deleted') {
+        const subscription = event.data.object;
+        const subId = subscription?.id;
+        let key = null;
+
+        if (useRedis) {
+          if (subId) key = await redis.hget('ronchon:submap', subId);
+          if (!key && subscription?.customer) {
+            key = await redis.hget('ronchon:keyByCustomer', subscription.customer);
+          }
+        } else {
+          if (subId && memory.submap.has(subId)) key = memory.submap.get(subId);
+          if (!key && subscription?.customer) {
+            key = memory.keyByCustomer.get(subscription.customer) || null;
+          }
+        }
+
+        console.log('[WH] customer.subscription.deleted', { subId, key });
+
+        if (key) {
+          await setPremium(key, false);
+
+          // Nettoyage
+          if (useRedis) {
+            if (subId) await redis.hdel('ronchon:submap', subId);
+            if (subscription?.customer) {
+              await redis.hdel('ronchon:keyByCustomer', subscription.customer);
+              // Optionnel: retirer aussi l'autre sens
+              // const customerId = await redis.hget('ronchon:customerByKey', key);
+              // if (customerId) await redis.hdel('ronchon:customerByKey', key);
+            }
+          } else {
+            if (subId) memory.submap.delete(subId);
+            if (subscription?.customer) {
+              memory.keyByCustomer.delete(subscription.customer);
+              // Optionnel: memory.customerByKey.delete(key);
+            }
+          }
+
+          console.log('[WH] Premium OFF + mappings cleaned');
+        } else {
+          console.warn('[WH] No key found for subscription/customer');
+        }
+
+        return res.json({ received: true });
+      }
+
+      // autres événements ignorés pour le MVP
+      console.log('[WH] Unhandled event:', event.type);
+      return res.json({ received: true });
+
+    } catch (err) {
+      console.error('[WH] Handler error:', err);
+      return res.status(500).json({ ok: false });
+    }
+  }
+);
+
+/* =========================
+   Middlewares JSON & limites
+========================= */
+
+// Après le webhook : on peut parser le JSON normalement
+app.use(express.json({ limit: '1mb' }));
+
+// Limiteur global (tu peux ajuster)
+const globalLimiter = rateLimit({
+  windowMs: 60_000, // 1 minute
+  max: 120
+});
+app.use(globalLimiter);
+
+/* =========================
+   Routes utilitaires
+========================= */
+
+app.get('/health', async (req, res) => {
+  let redisOk = false;
+  try {
+    if (useRedis) {
+      await redis.ping();
+      redisOk = true;
+    }
+  } catch (e) {
+    redisOk = false;
+  }
+  res.json({ ok: true, redis: redisOk, date: new Date().toISOString() });
 });
 
-// ---------------------------
-// Healthcheck
-// ---------------------------
-app.get('/', (req, res) => {
-  res.json({ ok: true, env: process.env.NODE_ENV || 'development' });
+app.get('/success', (req, res) => {
+  res.sendFile(path.join(__dirname, 'success.html'));
 });
 
-// ---------------------------
-// Stripe: Checkout (subscription)
-// ---------------------------
+app.get('/cancel', (req, res) => {
+  res.sendFile(path.join(__dirname, 'cancel.html'));
+});
+
+/* =========================
+   Stripe Checkout
+========================= */
+
 app.post('/api/stripe/checkout', async (req, res) => {
   try {
+    if (!stripe) {
+      return res.status(500).json({ error: 'missing_STRIPE_SECRET_KEY' });
+    }
+    if (!process.env.STRIPE_PRICE_ID) {
+      return res.status(500).json({ error: 'missing_STRIPE_PRICE_ID' });
+    }
     const key = getClientKey(req);
+    const base = process.env.FRONTEND_BASE_URL || `https://google.com`;
+
     const session = await stripe.checkout.sessions.create({
       mode: 'subscription',
       line_items: [{ price: process.env.STRIPE_PRICE_ID, quantity: 1 }],
       client_reference_id: key,
-      // 👇 On copie la key dans la meta de l'abonnement pour la retrouver en webhook
-      subscription_data: { metadata: { ronchon_key: key } },
-      success_url: (process.env.FRONTEND_BASE_URL || 'https://example.com') + '/success',
-      cancel_url: (process.env.FRONTEND_BASE_URL || 'https://example.com') + '/cancel',
+      success_url: `${base}/success`,
+      cancel_url: `${base}/cancel`
     });
+
+    // debug utile en prod
+    console.log('[Checkout] session created:', session.id);
     return res.json({ url: session.url });
   } catch (e) {
-    console.error('Stripe checkout error:', e);
-    res.status(500).json({ error: 'stripe_checkout_failed' });
+    console.error('checkout error:', e?.type, e?.message);
+    return res.status(500).json({
+      error: 'checkout_failed',
+      reason: e?.type || 'unknown',
+      message: e?.message || 'n/a'
+    });
   }
 });
 
-// ---------------------------
-// Plan côté client
-// ---------------------------
-app.get('/api/me/plan', async (req, res) => {
+/* =========================
+   User status & mock upgrade
+========================= */
+
+app.get('/api/user/status', async (req, res) => {
   const key = getClientKey(req);
-  const premium = await isPremium(key);
-  res.json({ plan: premium ? 'premium' : 'free' });
+  const date = todayStr();
+  const tier = (await isPremium(key)) ? 'premium' : 'free';
+  const limit = await getLimit(key);
+  const count = await getHits(key, date);
+  res.json({ tier, count, limit, date });
 });
 
-// ---------------------------
-// Exemple endpoint message (garde ton implémentation OpenAI si tu en as une)
-// ---------------------------
+app.post('/api/user/upgrade-mock', async (req, res) => {
+  const key = getClientKey(req);
+  await setPremium(key, true);
+  res.json({ ok: true, tier: 'premium' });
+});
+
+/* =========================
+   Message (OpenAI) + quotas
+========================= */
+
+const messageLimiter = rateLimit({
+  windowMs: 60_000, // 1 min
+  max: 60
+});
+app.use('/api/message', messageLimiter);
+
 app.post('/api/message', async (req, res) => {
   try {
     const key = getClientKey(req);
-    const premium = await isPremium(key);
-    const limit = Number(process.env.FREE_DAILY_LIMIT || 20);
+    const date = todayStr();
+    const tier = (await isPremium(key)) ? 'premium' : 'free';
+    const limit = await getLimit(key);
+    const count = await getHits(key, date);
 
-    if (!premium) {
-      const hits = await getHits(key);
-      if (hits >= limit) return res.status(429).json({ error: 'quota_exceeded', message: 'Limite atteinte. Passe en premium pour continuer.' });
+    if (count >= limit) {
+      return res.status(429).json({ error: 'QUOTA_REACHED', tier, count, limit, date });
     }
 
-    await incrementHits(key);
+    // Validation d’entrée (simple et stricte)
+    const personality = (req.body?.personality || 'Doudou').toString().slice(0, 32);
+    let messages = Array.isArray(req.body?.messages) ? req.body.messages : [];
+    messages = messages
+      .filter(m => m && typeof m.role === 'string' && typeof m.content === 'string')
+      .slice(-10);
 
-    // ⬇️ Conserve ta logique OpenAI existante ici si tu en as une.
-    // Placeholder neutre pour ne rien casser si l'appel OpenAI est ailleurs.
-    return res.json({ ok: true, reply: 'Réponse mock (branche OpenAI ici si besoin).' });
-  } catch (e) {
-    console.error('API /api/message error:', e);
-    res.status(500).json({ error: 'server_error' });
-  }
-});
+    if (messages.length === 0) {
+      return res.status(400).json({ error: 'EMPTY_MESSAGES' });
+    }
+    // Hard cap sur la taille d’un tour pour éviter les abus
+    const totalLen = messages.reduce((n, m) => n + m.content.length, 0);
+    if (totalLen > 6000) {
+      return res.status(400).json({ error: 'TOO_LONG' });
+    }
 
-// ---------------------------
-// Webhook Stripe (RAW BODY)
-// ---------------------------
-app.post('/api/stripe/webhook', bodyParser.raw({ type: 'application/json' }), async (req, res) => {
-  const sig = req.headers['stripe-signature'];
-  let event;
+    // Prompt système selon la personnalité
+    const systemPersona = {
+      Doudou: "Tu es Ronchon en mode Doudou : chaleureux mais un peu grognon. Tu n'es pas conciliant gratuitement : tu corriges les erreurs, tu contredis quand c'est nécessaire, tu restes bref et franc.",
+      Trouillard: "Tu es Ronchon en mode Trouillard : anxieux, prudent, tu remets en question tout ce qui te semble flou. Tu refuses la complaisance.",
+      "Énervé": "Tu es Ronchon en mode Énervé : sec, sarcastique mais pas insultant. Tu contraries quand c'est pertinent et tu vas droit au but.",
+      Hater: "Tu es Ronchon en mode Hater : cash et taquin. Tu pointes les incohérences sans ménagement mais sans haine réelle."
+    }[personality] || "Tu es Ronchon : tu refuses d'être complaisant. Tu contredis quand c'est utile, tu aides avec honnêteté.";
 
-  try {
-    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+    const model = (tier === 'premium') ? MODEL_PREMIUM : MODEL_FREE;
+
+    // Appel OpenAI (chat.completions - v5 client)
+    const completion = await openai.chat.completions.create({
+      model,
+      temperature: Number(process.env.OPENAI_TEMPERATURE || 0.7),
+      messages: [
+        { role: 'system', content: systemPersona },
+        ...messages
+      ]
+    });
+
+    const reply = completion.choices?.[0]?.message?.content || "…";
+
+    // Incrémenter l'usage après réponse OK
+    await incHits(key, date);
+
+    return res.json({ response: reply, tier, date });
+
   } catch (err) {
-    console.error('❌ Webhook signature verification failed:', err.message);
-    return res.status(400).send('Webhook Error: ' + err.message);
-  }
-
-  if (await hasProcessed(event.id)) {
-    return res.status(200).send('Event already processed');
-  }
-
-  try {
-    switch (event.type) {
-      case 'checkout.session.completed': {
-        const session = event.data.object;
-        const key = session && session.client_reference_id;
-        const customerId = session && session.customer;
-        if (key) await setPremium(key, true);
-        if (customerId && key) await saveCustomerKey(customerId, key);
-        console.log('✅ checkout.session.completed → premium ON', { key, customerId });
-        break;
-      }
-      case 'invoice.payment_succeeded': {
-        const invoice = event.data.object;
-        const customerId = invoice && invoice.customer;
-        const key = customerId ? (await getKeyFromCustomer(customerId)) : null;
-        if (key) await setPremium(key, true);
-        console.log('💳 invoice.payment_succeeded', { customerId, key });
-        break;
-      }
-      case 'customer.subscription.updated': {
-        const subscription = event.data.object;
-        const customerId = subscription && subscription.customer;
-        const cancelAtPeriodEnd = subscription && subscription.cancel_at_period_end;
-        const keyMeta = subscription && subscription.metadata && subscription.metadata.ronchon_key;
-        const key = keyMeta || (customerId ? (await getKeyFromCustomer(customerId)) : null);
-        if (key) {
-          await setPremium(key, true); // premium reste actif jusqu'à fin de période si cancel_at_period_end
-          console.log('🔁 subscription.updated', { customerId, key, cancelAtPeriodEnd });
-        }
-        break;
-      }
-      case 'customer.subscription.deleted': {
-        const subscription = event.data.object;
-        const customerId = subscription && subscription.customer;
-        const keyMeta = subscription && subscription.metadata && subscription.metadata.ronchon_key;
-        let key = keyMeta || null;
-        if (!key && customerId) key = await getKeyFromCustomer(customerId);
-        if (key) {
-          await setPremium(key, false); // downgrade
-          console.log('🧹 subscription.deleted → premium OFF', { customerId, key });
-        } else {
-          console.warn('⚠️ subscription.deleted reçu mais key introuvable', { customerId });
-        }
-        break;
-      }
-      default:
-        console.log('ℹ️ Unhandled event', event.type);
-    }
-
-    await markProcessed(event.id);
-    return res.status(200).send('ok');
-  } catch (e) {
-    console.error('🔥 Webhook handler error:', e);
-    return res.status(500).send('Webhook handler error');
+    console.error('/api/message error:', err?.message || err);
+    return res.status(500).json({ error: 'SERVER_ERROR' });
   }
 });
 
-// ---------------------------
-// (Optionnel) simulateurs DEV — à supprimer en prod
-// ---------------------------
-if (process.env.DEV_TEST_SECRET) {
-  app.post('/dev/simulate/checkout-completed', express.json(), async (req, res) => {
-    try {
-      if (req.headers['x-dev-secret'] !== process.env.DEV_TEST_SECRET) return res.status(403).json({ error: 'forbidden' });
-      const { key, customerId } = req.body || {};
-      if (!key) return res.status(400).json({ error: 'missing_key' });
-      await setPremium(key, true);
-      if (customerId) await saveCustomerKey(customerId, key);
-      res.json({ ok: true, simulated: 'checkout.session.completed', key, customerId });
-    } catch (e) { res.status(500).json({ error: 'server_error' }); }
-  });
-  app.post('/dev/simulate/sub-deleted', express.json(), async (req, res) => {
-    try {
-      if (req.headers['x-dev-secret'] !== process.env.DEV_TEST_SECRET) return res.status(403).json({ error: 'forbidden' });
-      const { key, customerId } = req.body || {};
-      let k = key || (customerId ? await getKeyFromCustomer(customerId) : null);
-      if (!k) return res.status(400).json({ error: 'key_not_found' });
-      await setPremium(k, false);
-      res.json({ ok: true, simulated: 'customer.subscription.deleted', key: k, customerId });
-    } catch (e) { res.status(500).json({ error: 'server_error' }); }
-  });
-}
+/* =========================
+   Démarrage serveur
+========================= */
 
-// ---------------------------
-// Pages HTML success & cancel
-// ---------------------------
-app.get('/success', (req, res) => {
-  res.type('html').send(`<!DOCTYPE html>
-<html lang="fr"><head><meta charset="utf-8"><title>Paiement réussi</title>
-<meta name="viewport" content="width=device-width,initial-scale=1" />
-<style>
-body{font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#0b1220;color:#e7f0ff}
-.card{background:#111b2e;border:1px solid #24314d;border-radius:16px;padding:28px;max-width:520px;box-shadow:0 8px 24px rgba(0,0,0,.35);text-align:center}
-h1{margin:0 0 8px;font-size:24px}
-p{opacity:.9}
-a.btn{display:inline-block;margin-top:16px;padding:10px 14px;border-radius:10px;border:1px solid #3a57a5;text-decoration:none;color:#e7f0ff}
-a.btn:hover{background:#1a2a52}
-</style></head>
-<body><div class="card">
-<h1>✅ Paiement réussi</h1>
-<p>Ton abonnement <b>Premium</b> est activé. Tu peux fermer cet onglet et retourner sur l’extension.</p>
-<a class="btn" href="/">Retour</a>
-</div></body></html>`);
-});
-
-app.get('/cancel', (req, res) => {
-  res.type('html').send(`<!DOCTYPE html>
-<html lang="fr"><head><meta charset="utf-8"><title>Paiement annulé</title>
-<meta name="viewport" content="width=device-width,initial-scale=1" />
-<style>
-body{font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#0b1220;color:#e7f0ff}
-.card{background:#111b2e;border:1px solid #24314d;border-radius:16px;padding:28px;max-width:520px;box-shadow:0 8px 24px rgba(0,0,0,.35);text-align:center}
-h1{margin:0 0 8px;font-size:24px}
-p{opacity:.9}
-a.btn{display:inline-block;margin-top:16px;padding:10px 14px;border-radius:10px;border:1px solid #a53a3a;text-decoration:none;color:#e7f0ff}
-a.btn:hover{background:#522a2a}
-</style></head>
-<body><div class="card">
-<h1>❌ Paiement annulé</h1>
-<p>Aucun débit n’a été effectué. Tu peux réessayer quand tu veux.</p>
-<a class="btn" href="/">Retour</a>
-</div></body></html>`);
-});
-
-// ---------------------------
-// Start server
-// ---------------------------
-const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`🚀 Ronchon backend listening on :${PORT}`);
+  console.log(`Ronchon backend listening on :${PORT}`);
 });
-
-
-
-
 
 
 
